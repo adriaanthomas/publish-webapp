@@ -58,6 +58,11 @@
     .PARAMETER WebAppName
         The name of the web app (Web Site) to deploy to. Note that to use this script, a call to `Login-AzureRmAccount`
         will have to be made first, to enable access to Azure.
+
+    .PARAMETER DoNotDeleteCurrentWebAppContents
+        When passed, the current contents of the web application will not be removed, only new content will be added (which
+        might overwrite existing files). When not passed, any files that exist in the web application but not in the deployment
+        package will be removed.
 #>
 [CmdletBinding()]
 param(
@@ -86,7 +91,9 @@ param(
     [string] $MsDeployPath = 'C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe',
 
     [Parameter(Mandatory=$true)]
-    [string] $WebAppName
+    [string] $WebAppName,
+
+    [switch] $DoNotDeleteCurrentWebAppContents
 )
 
 # stop on errors
@@ -300,7 +307,8 @@ function Publish-DeployPackage([string] $packagePath) {
     # now run msdeploy to update the web site
     & $MsDeployPath -verb:sync -source:package=`'$packagePath`' `
         -dest:auto`,ComputerName=`'https://$WebAppName.scm.azurewebsites.net:443/msdeploy.axd?site=$WebAppName`'`,UserName=`'$($config.publishingUserName)`'`,Password=`'$($config.publishingPassword)`'`,AuthType=`'Basic`' `
-        -setParam:name=`'IIS Web Application Name`',value=`'$WebAppName`' -enableRule:AppOffline
+        -setParam:name=`'IIS Web Application Name`',value=`'$WebAppName`' -enableRule:AppOffline `
+        $(if ($DoNotDeleteCurrentWebAppContents) { '-enableRule:DoNotDeleteRule' })
     if ($LastExitCode -ne 0) {
         throw "$MsDeployPath returns non-zero exit code: $LastExitCode"
     }
@@ -312,8 +320,8 @@ function Publish-DeployPackage([string] $packagePath) {
 #>
 function Remove-WorkingFiles([string] $packagePath) {
     if (Test-Path -Path $ArtifactFilePath) {
-    Write-Verbose "Removing $ArtifactFilePath"
-    Remove-Item -Force $ArtifactFilePath
+        Write-Verbose "Removing $ArtifactFilePath"
+        Remove-Item -Force $ArtifactFilePath
     }
     if ($packagePath -and (Test-Path -Path $packagePath)) {
         Write-Verbose "Removing $packagePath"
