@@ -299,8 +299,8 @@ function Publish-DeployPackage([string] $packagePath) {
 
     # now run msdeploy to update the web site
     & $MsDeployPath -verb:sync -source:package=`'$packagePath`' `
-        -dest:contentPath=`'$WebAppName`'`,ComputerName=`'https://$WebAppName.scm.azurewebsites.net:443/msdeploy.axd?site=$WebAppName`'`,UserName=`'$($config.publishingUserName)`'`,Password=`'$($config.publishingPassword)`'`,AuthType=`'Basic`' `
-        -enableRule:AppOffline
+        -dest:auto`,ComputerName=`'https://$WebAppName.scm.azurewebsites.net:443/msdeploy.axd?site=$WebAppName`'`,UserName=`'$($config.publishingUserName)`'`,Password=`'$($config.publishingPassword)`'`,AuthType=`'Basic`' `
+        -setParam:name=`'IIS Web Application Name`',value=`'$WebAppName`' -enableRule:AppOffline
     if ($LastExitCode -ne 0) {
         throw "$MsDeployPath returns non-zero exit code: $LastExitCode"
     }
