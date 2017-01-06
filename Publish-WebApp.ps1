@@ -311,9 +311,11 @@ function Publish-DeployPackage([string] $packagePath) {
     Removes (temporary) working files created by this script.
 #>
 function Remove-WorkingFiles([string] $packagePath) {
+    if (Test-Path -Path $ArtifactFilePath) {
     Write-Verbose "Removing $ArtifactFilePath"
     Remove-Item -Force $ArtifactFilePath
-    if ($packagePath) {
+    }
+    if ($packagePath -and (Test-Path -Path $packagePath)) {
         Write-Verbose "Removing $packagePath"
         Remove-Item -Force $packagePath
     }
