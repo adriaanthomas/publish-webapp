@@ -128,9 +128,7 @@ function Send-VstsRequest([string] $resource, [string[]] $params) {
     $urlParams = if ($params -eq $null -or $params.Length -eq 0) {
         $VstsApiVersionParam
     } else {
-        $list = ([System.Collections.ArrayList] $params)
-        $list.Add($VstsApiVersionParam)
-        $list -join '&'
+        ($params += $VstsApiVersionParam) -join '&'
     }
 
     return Invoke-RestMethod -Uri "${VstsBaseUrl}${resource}?${urlParams}" -Headers $VstsHeaders
