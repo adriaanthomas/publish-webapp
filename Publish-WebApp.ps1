@@ -43,8 +43,8 @@
         publishes to a different artifact.
 
     .PARAMETER DeployPackagePathInArtifact
-        The path of the deployment package stored in the artifact. If there is only one deployment package (.zip file)
-        in the artifact, that will be deployed, but if there are more, one must be specified.
+        The path of the deployment package stored in the artifact. If not specified, all deployment packages found
+        in the build artifact (all zip files) will be deployed to the same web application.
 
     .PARAMETER VstsCredential
         A `PSCredential` object that allows access to Visual Studio Team Services builds. Typically this will be a Personal
@@ -57,12 +57,16 @@
 
     .PARAMETER WebAppName
         The name of the web app (Web Site) to deploy to. Note that to use this script, a call to `Login-AzureRmAccount`
-        will have to be made first, to enable access to Azure.
+        will have to be made first, to enable access to Azure, followed by `Select-AzureRmSubscription` to activate
+        the proper subscription.
 
     .PARAMETER DoNotDeleteCurrentWebAppContents
         When passed, the current contents of the web application will not be removed, only new content will be added (which
         might overwrite existing files). When not passed, any files that exist in the web application but not in the deployment
         package will be removed.
+
+        If there are several deployment packages in the build artifact, when deploying the first package will any other contents
+        be removed, not for following packages.
 #>
 [CmdletBinding()]
 param(
@@ -218,24 +222,22 @@ function Open-ArtifactArchive {
 
 <#
 .SYNOPSIS
-    If DeployPackagePathInArtifact has not been specified, checks if there is only one web deployment package in
-    the build artifact and if so, returns the path to it, otherwise throws an error.
+    If DeployPackagePathInArtifact has not been specified, finds all deployment packages (zip files) in the archive.
+    If DeployPackagePathInArtifact has a value, that is symply returned.
 #>
-function Find-DeployPackageInArchive([System.IO.Compression.ZipArchive] $archive) {
-    $entryName = if (-not $DeployPackagePathInArtifact) {
-        $packages = ($archive.Entries | where FullName -match '\.zip$')
+function Find-DeployPackagesInArchive([System.IO.Compression.ZipArchive] $archive) {
+    $entryNames = if (-not $DeployPackagePathInArtifact) {
+        $packages = ($archive.Entries | Where-Object FullName -match '\.zip$')
         if ($packages.Count -eq 0) {
             throw "No zip files found in $VstsBuildArtifactName"
-        } elseif ($packages.Count -gt 1) {
-            throw "Too many zip files found in $VstsBuildArtifactName ($($packages.Count)), use -DeployPackagePathInArtifact with one of $($packages.FullName)"
         }
-        Write-Host "Using deploy package $($packages.FullName)"
         $packages.FullName
     } else {
-        $DeployPackagePathInArtifact
+        @($DeployPackagePathInArtifact)
     }
+    Write-Host "Using deploy packages $entryNames"
 
-    return $archive.GetEntry($entryName)
+    return $entryNames | ForEach-Object { $archive.GetEntry($_) }
 }
 
 <#
@@ -252,7 +254,7 @@ function Expand-DeployPackageFromArchive([System.IO.Compression.ZipArchiveEntry]
         try {
             $inStream.CopyTo($outStream)
         } finally {
-            $outStream.Dispose();
+            $outStream.Dispose()
         }
     } finally {
         $inStream.Dispose()
@@ -263,13 +265,12 @@ function Expand-DeployPackageFromArchive([System.IO.Compression.ZipArchiveEntry]
 
 <#
 .SYNOPSIS
-    Extracts the web deployment package from the build artifact and returns the path to the local file.
+    Extracts the web deployment packages from the build artifact and returns the path to the local file.
 #>
-function Get-DeployPackage {
+function Get-DeployPackages {
     $archive = Open-ArtifactArchive
     try {
-        $entry = Find-DeployPackageInArchive $archive
-        Expand-DeployPackageFromArchive $entry
+        Find-DeployPackagesInArchive $archive | ForEach-Object { Expand-DeployPackageFromArchive $_ }
     } finally {
         $archive.Dispose()
     }
@@ -290,7 +291,7 @@ function Assert-MsDeployPath {
 .SYNOPSIS
     Deploys the web deployment package at `packagePath` to the Azure web site with name `WebAppName`.
 #>
-function Publish-DeployPackage([string] $packagePath) {
+function Publish-DeployPackage([string] $packagePath, [bool] $doNotDelete) {
     Write-Host "Publishing $packagePath to $WebAppName"
     # find the resource group for the web app
     $webApp = Get-AzureRmWebApp -Name $WebAppName -ErrorAction SilentlyContinue
@@ -308,7 +309,7 @@ function Publish-DeployPackage([string] $packagePath) {
     & $MsDeployPath -verb:sync -source:package=`'$packagePath`' `
         -dest:auto`,ComputerName=`'https://$WebAppName.scm.azurewebsites.net:443/msdeploy.axd?site=$WebAppName`'`,UserName=`'$($config.publishingUserName)`'`,Password=`'$($config.publishingPassword)`'`,AuthType=`'Basic`' `
         -setParam:name=`'IIS Web Application Name`',value=`'$WebAppName`' -enableRule:AppOffline `
-        $(if ($DoNotDeleteCurrentWebAppContents) { '-enableRule:DoNotDeleteRule' })
+        $(if ($doNotDelete) { '-enableRule:DoNotDeleteRule' })
     if ($LastExitCode -ne 0) {
         throw "$MsDeployPath returns non-zero exit code: $LastExitCode"
     }
@@ -318,14 +319,18 @@ function Publish-DeployPackage([string] $packagePath) {
 .SYNOPSIS
     Removes (temporary) working files created by this script.
 #>
-function Remove-WorkingFiles([string] $packagePath) {
+function Remove-WorkingFiles([string[]] $packagePaths) {
     if (Test-Path -Path $ArtifactFilePath) {
         Write-Verbose "Removing $ArtifactFilePath"
         Remove-Item -Force $ArtifactFilePath
     }
-    if ($packagePath -and (Test-Path -Path $packagePath)) {
-        Write-Verbose "Removing $packagePath"
-        Remove-Item -Force $packagePath
+    if ($packagePaths) {
+        $packagePaths | ForEach-Object {
+            if (Test-Path -Path $_) {
+                Write-Verbose "Removing $_"
+                Remove-Item -Force $_
+            }
+        }
     }
 }
 
@@ -339,11 +344,18 @@ try {
     # 1. Download the build artifact to a local file
     Get-BuildArtifact
 
-    # 2. Extract the deployment package from that
-    $packagePath = Get-DeployPackage
+    # 2. Extract the deployment packages from that
+    $packagePaths = Get-DeployPackages
 
-    # 3. Deploy the deployment package
-    Publish-DeployPackage $packagePath
+    # 3. Deploy the deployment packages
+    $packagePaths | ForEach-Object {
+        # if there are multiple deployment packages, only allow DoNotDelete for the first deployment
+        $doNotDelete = if ($doneOne) { $true } else {
+            $doneOne = $true
+            $DoNotDeleteCurrentWebAppContents
+        }
+        Publish-DeployPackage $_ $doNotDelete
+    }
 } finally {
-    Remove-WorkingFiles $packagePath
+    Remove-WorkingFiles $packagePaths
 }
