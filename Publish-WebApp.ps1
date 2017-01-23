@@ -122,9 +122,7 @@ Set-Variable -Option Constant -Name VstsAuth -Value ([Convert]::ToBase64String([
 )))
 Set-Variable -Option Constant -Name VstsHeaders -Value @{Authorization = "Basic $VstsAuth"}
 
-Set-Variable -Option Constant -Name WorkingDir -Value $env:TMP
-Set-Variable -Option Constant -Name ArtifactFilePath -Value (Join-Path $WorkingDir "$VstsBuildArtifactName.zip")
-Set-Variable -Option Constant -Name DeployPackageDir -Value $WorkingDir
+Set-Variable -Option Constant -Name WorkingDir -Value (Join-Path $env:TMP 'Publish-WebApp')
 
 Write-Verbose "ArtifactFilePath            = $ArtifactFilePath"
 
@@ -208,16 +206,27 @@ function Get-BuildArtifact {
     $buildId = Find-BuildID $buildDefId
     $artifactUrl = Find-BuildArtifactUrl $buildId
 
-    Write-Verbose "Downloading build artifact to $ArtifactFilePath"
-    Invoke-WebRequest -Uri $artifactUrl -Headers $VstsHeaders -OutFile $ArtifactFilePath
+    $targetDir = [System.IO.Path]::Combine($WorkingDir, $VstsInstanceName, $buildDefId, $buildId)
+    $targetFile = Join-Path $targetDir "$VstsBuildArtifactName.zip"
+
+    if (-not (Test-Path $targetDir)) {
+        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+    }
+    if (Test-Path $targetFile) {
+        Write-Verbose "Skipping download of $targetFile; using cached version"
+    } else {
+        Write-Verbose "Downloading build artifact to $targetFile"
+        Invoke-WebRequest -Uri $artifactUrl -Headers $VstsHeaders -OutFile $targetFile
+    }
+    return $targetFile
 }
 
 <#
 .SYNOPSIS
     Opens a build artifact zip file. The zip file will have been downloaded by `Get-BuildArtifact`.
 #>
-function Open-ArtifactArchive {
-    return [System.IO.Compression.ZipFile]::OpenRead($ArtifactFilePath)
+function Open-ArtifactArchive([string] $artifactPath) {
+    return [System.IO.Compression.ZipFile]::OpenRead($artifactPath)
 }
 
 <#
@@ -242,10 +251,10 @@ function Find-DeployPackagesInArchive([System.IO.Compression.ZipArchive] $archiv
 
 <#
 .SYNOPSIS
-    Expands a Zip file entry to a file in `$DeployPackageDir` and returns the local path to the deployment package.
+    Expands a Zip file entry to a file in `$WorkingDir` and returns the local path to the deployment package.
 #>
 function Expand-DeployPackageFromArchive([System.IO.Compression.ZipArchiveEntry] $entry) {
-    $localFile = Join-Path $DeployPackageDir $entry.Name
+    $localFile = Join-Path $WorkingDir $entry.Name
     Write-Verbose "Saving deploy package to $localFile"
 
     $inStream = $entry.Open()
@@ -267,8 +276,8 @@ function Expand-DeployPackageFromArchive([System.IO.Compression.ZipArchiveEntry]
 .SYNOPSIS
     Extracts the web deployment packages from the build artifact and returns the path to the local file.
 #>
-function Get-DeployPackages {
-    $archive = Open-ArtifactArchive
+function Get-DeployPackages([string] $artifactPath) {
+    $archive = Open-ArtifactArchive $artifactPath
     try {
         Find-DeployPackagesInArchive $archive | ForEach-Object { Expand-DeployPackageFromArchive $_ }
     } finally {
@@ -320,10 +329,6 @@ function Publish-DeployPackage([string] $packagePath, [bool] $doNotDelete) {
     Removes (temporary) working files created by this script.
 #>
 function Remove-WorkingFiles([string[]] $packagePaths) {
-    if (Test-Path -Path $ArtifactFilePath) {
-        Write-Verbose "Removing $ArtifactFilePath"
-        Remove-Item -Force $ArtifactFilePath
-    }
     if ($packagePaths) {
         $packagePaths | ForEach-Object {
             if (Test-Path -Path $_) {
@@ -342,10 +347,10 @@ Assert-MsDeployPath
 
 try {
     # 1. Download the build artifact to a local file
-    Get-BuildArtifact
+    $artifactPath = Get-BuildArtifact
 
     # 2. Extract the deployment packages from that
-    $packagePaths = Get-DeployPackages
+    $packagePaths = Get-DeployPackages $artifactPath
 
     # 3. Deploy the deployment packages
     $packagePaths | ForEach-Object {
